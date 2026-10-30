@@ -1,6 +1,6 @@
 use anyhow::{Result, bail, ensure};
 use clap::Parser;
-use gridstream::{
+use sensor_relay::{
     edge::{client, synthetic_samples},
     model::*,
 };
@@ -16,7 +16,7 @@ use uuid::Uuid;
 struct Args {
     #[arg(long, default_value = "http://127.0.0.1:8080")]
     url: String,
-    #[arg(long, env = "GRIDSTREAM_DEVICE_TOKEN", hide_env_values = true)]
+    #[arg(long, env = "SENSOR_RELAY_WRITE_TOKEN", hide_env_values = true)]
     token: String,
     #[arg(long, default_value_t = 64)]
     devices: usize,
@@ -138,7 +138,8 @@ async fn main() -> Result<()> {
     println!(
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
-            "run_id":run_id,"devices":args.devices,"batches_per_device":args.batches,"batch_size":args.batch_size,
+        "run_id":run_id,"project_version":env!("CARGO_PKG_VERSION"),"sample_format":"temperature_mc + battery_bps",
+        "devices":args.devices,"batches_per_device":args.batches,"batch_size":args.batch_size,
             "concurrency":args.concurrency,"unique_samples":samples,"committed_batches":latencies.len(),"http_attempts":counts.attempts,
             "duplicate_receipts":counts.duplicates,"overloaded_responses":counts.overloaded,
             "elapsed_seconds":elapsed,"unique_samples_per_second":samples as f64/elapsed,

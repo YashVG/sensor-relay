@@ -80,8 +80,8 @@ impl Store {
                     batch.stream_id,
                     batch.first_seq + index as i64,
                     sample.observed_ms,
-                    sample.power_w,
-                    sample.soc_bps as i32
+                    sample.temperature_mc,
+                    sample.battery_bps as i32
                 ])?;
             }
             appender.flush()?;
@@ -107,7 +107,7 @@ impl Store {
         })
     }
 
-    pub fn fleet(&self, now: i64, freshness_ms: i64) -> Result<Fleet> {
+    pub fn snapshot(&self, now: i64, freshness_ms: i64) -> Result<Snapshot> {
         if !(1..=86_400_000).contains(&freshness_ms) {
             return Err(StoreError::Invalid(
                 "freshness_ms must be 1..86400000".into(),
@@ -120,12 +120,12 @@ impl Store {
                 SELECT *, row_number() OVER (PARTITION BY device_id ORDER BY observed_ms DESC, stream_id DESC, seq DESC) AS rank
                 FROM telemetry WHERE observed_ms <= ?
              ) SELECT count(*), count(*) FILTER (WHERE observed_ms >= ?),
-                coalesce(sum(power_w) FILTER (WHERE observed_ms >= ?), 0)::BIGINT,
-                avg(soc_bps) FILTER (WHERE observed_ms >= ?) FROM latest WHERE rank=1",
+                avg(temperature_mc) FILTER (WHERE observed_ms >= ?),
+                avg(battery_bps) FILTER (WHERE observed_ms >= ?) FROM latest WHERE rank=1",
             params![now, now-freshness_ms, now-freshness_ms, now-freshness_ms],
-            |row| Ok(Fleet { committed_samples: 0, committed_batches: 0, known_devices: row.get(0)?,
-                fresh_devices: row.get(1)?, stale_devices: 0, net_power_w: row.get(2)?,
-                average_soc_bps: row.get(3)?, as_of_ms: now, freshness_ms }),
+            |row| Ok(Snapshot { committed_samples: 0, committed_batches: 0, known_devices: row.get(0)?,
+                fresh_devices: row.get(1)?, stale_devices: 0, mean_temperature_mc: row.get(2)?,
+                average_battery_bps: row.get(3)?, as_of_ms: now, freshness_ms }),
         )?;
         stats.committed_samples =
             self.conn
@@ -149,7 +149,7 @@ impl Store {
         }
         let mut stmt = self.conn.prepare(
             "SELECT (observed_ms // ?) * ? AS bucket_ms, count(*), count(DISTINCT device_id),
-                avg(power_w), min(soc_bps) FROM telemetry
+                avg(temperature_mc), min(battery_bps) FROM telemetry
              WHERE observed_ms >= ? AND observed_ms < ? GROUP BY 1 ORDER BY 1",
         )?;
         let rows = stmt.query_map(params![bucket_ms, bucket_ms, from, to], |row| {
@@ -157,121 +157,12 @@ impl Store {
                 bucket_ms: row.get(0)?,
                 samples: row.get(1)?,
                 devices: row.get(2)?,
-                mean_power_w: row.get(3)?,
-                min_soc_bps: row.get(4)?,
+                mean_temperature_mc: row.get(3)?,
+                min_battery_bps: row.get(4)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
-
-    pub fn issue_command(&mut self, req: &CommandRequest, now: i64) -> Result<Command> {
-        if !valid_id(&req.command_id)
-            || !valid_id(&req.device_id)
-            || !(-10_000..=10_000).contains(&req.target_w)
-        {
-            return Err(StoreError::Invalid(
-                "invalid command/device ID or target outside +/-10000W".into(),
-            ));
-        }
-        if let Some(old) = self.command_by_id(&req.command_id)? {
-            if old.device_id != req.device_id
-                || old.target_w != req.target_w
-                || old.expires_ms != req.expires_ms
-            {
-                return Err(StoreError::Conflict(
-                    "command ID reused with different payload".into(),
-                ));
-            }
-            return Ok(old);
-        }
-        if req.expires_ms <= now || req.expires_ms > now.saturating_add(300_000) {
-            return Err(StoreError::Invalid(
-                "new command must expire within the next five minutes".into(),
-            ));
-        }
-        let last: Option<i64> = self.conn.query_row(
-            "SELECT max(observed_ms) FROM telemetry WHERE device_id=? AND observed_ms<=?",
-            params![req.device_id, now],
-            |r| r.get(0),
-        )?;
-        if last.is_none_or(|t| now - t > 30_000) {
-            return Err(StoreError::Conflict(
-                "cannot issue command to a device without fresh telemetry".into(),
-            ));
-        }
-        let generation: i64 = self.conn.query_row(
-            "SELECT coalesce(max(generation), 0)+1 FROM commands WHERE device_id=?",
-            params![req.device_id],
-            |r| r.get(0),
-        )?;
-        self.conn.execute(
-            "INSERT INTO commands VALUES (?, ?, ?, ?, ?, false)",
-            params![
-                req.command_id,
-                req.device_id,
-                req.target_w,
-                req.expires_ms,
-                generation
-            ],
-        )?;
-        Ok(Command {
-            command_id: req.command_id.clone(),
-            device_id: req.device_id.clone(),
-            target_w: req.target_w,
-            expires_ms: req.expires_ms,
-            generation,
-            acknowledged: false,
-        })
-    }
-
-    fn command_by_id(&self, id: &str) -> Result<Option<Command>> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT * FROM commands WHERE command_id=?",
-                params![id],
-                read_command,
-            )
-            .optional()?)
-    }
-
-    pub fn current_command(&self, device: &str, now: i64) -> Result<Option<Command>> {
-        let command = self
-            .conn
-            .query_row(
-                "SELECT * FROM commands WHERE device_id=? ORDER BY generation DESC LIMIT 1",
-                params![device],
-                read_command,
-            )
-            .optional()?;
-        Ok(command.filter(|c| c.expires_ms > now))
-    }
-
-    pub fn ack_command(&mut self, device: &str, id: &str, now: i64) -> Result<Command> {
-        let mut command = self
-            .current_command(device, now)?
-            .filter(|c| c.command_id == id)
-            .ok_or_else(|| {
-                StoreError::Conflict("command expired, superseded, or unknown".into())
-            })?;
-        self.conn.execute(
-            "UPDATE commands SET acknowledged=true WHERE command_id=?",
-            params![id],
-        )?;
-        command.acknowledged = true;
-        Ok(command)
-    }
-}
-
-fn read_command(row: &duckdb::Row<'_>) -> duckdb::Result<Command> {
-    Ok(Command {
-        command_id: row.get(0)?,
-        device_id: row.get(1)?,
-        target_w: row.get(2)?,
-        expires_ms: row.get(3)?,
-        generation: row.get(4)?,
-        acknowledged: row.get(5)?,
-    })
 }
 
 #[cfg(test)]
@@ -296,8 +187,8 @@ mod tests {
             .unwrap();
         let sample = Sample {
             observed_ms: 1000,
-            power_w: 10,
-            soc_bps: 5000,
+            temperature_mc: 10,
+            battery_bps: 5000,
         };
         let mut batch = Batch {
             device_id: "a".into(),
@@ -306,7 +197,7 @@ mod tests {
             samples: vec![sample.clone(), sample],
         };
         assert!(matches!(store.ingest(&batch, 1000), Err(StoreError::Db(_))));
-        assert_eq!(store.fleet(1000, 100).unwrap().committed_samples, 0);
+        assert_eq!(store.snapshot(1000, 100).unwrap().committed_samples, 0);
         let streams: i64 = store
             .conn
             .query_row("SELECT count(*) FROM streams", [], |r| r.get(0))

@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const MAX_BATCH: usize = 256;
-pub const MAX_POWER_W: i64 = 1_000_000;
+pub const MIN_TEMPERATURE_MC: i64 = -40_000;
+pub const MAX_TEMPERATURE_MC: i64 = 125_000;
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -23,10 +24,10 @@ pub fn valid_id(id: &str) -> bool {
 #[serde(deny_unknown_fields)]
 pub struct Sample {
     pub observed_ms: i64,
-    /// Positive = export/discharge, negative = import/charge. Synthetic watts.
-    pub power_w: i64,
+    /// Temperature in thousandths of a degree Celsius: 23500 means 23.5 C.
+    pub temperature_mc: i64,
     /// Battery state of charge, in basis points: 0..=10000.
-    pub soc_bps: u16,
+    pub battery_bps: u16,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -60,8 +61,12 @@ impl Batch {
             if sample.observed_ms < 0 || sample.observed_ms > now.saturating_add(60_000) {
                 return Err("timestamp is negative or more than 60 seconds in the future".into());
             }
-            if !(-MAX_POWER_W..=MAX_POWER_W).contains(&sample.power_w) || sample.soc_bps > 10_000 {
-                return Err("sample outside the simulator's power or charge bounds".into());
+            if !(MIN_TEMPERATURE_MC..=MAX_TEMPERATURE_MC).contains(&sample.temperature_mc)
+                || sample.battery_bps > 10_000
+            {
+                return Err(
+                    "temperature must be -40..125 C and battery must be 0..100 percent".into(),
+                );
             }
         }
         Ok(())
@@ -76,14 +81,14 @@ pub struct Receipt {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Fleet {
+pub struct Snapshot {
     pub committed_samples: i64,
     pub committed_batches: i64,
     pub known_devices: i64,
     pub fresh_devices: i64,
     pub stale_devices: i64,
-    pub net_power_w: i64,
-    pub average_soc_bps: Option<f64>,
+    pub mean_temperature_mc: Option<f64>,
+    pub average_battery_bps: Option<f64>,
     pub as_of_ms: i64,
     pub freshness_ms: i64,
 }
@@ -93,26 +98,7 @@ pub struct Window {
     pub bucket_ms: i64,
     pub samples: i64,
     pub devices: i64,
-    /// Sample-weighted mean, NOT time-integrated energy or simultaneous fleet power.
-    pub mean_power_w: f64,
-    pub min_soc_bps: u16,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CommandRequest {
-    pub command_id: String,
-    pub device_id: String,
-    pub target_w: i64,
-    pub expires_ms: i64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Command {
-    pub command_id: String,
-    pub device_id: String,
-    pub target_w: i64,
-    pub expires_ms: i64,
-    pub generation: i64,
-    pub acknowledged: bool,
+    /// Mean over all readings in this window; faster sensors contribute more.
+    pub mean_temperature_mc: f64,
+    pub min_battery_bps: u16,
 }

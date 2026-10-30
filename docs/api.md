@@ -1,71 +1,63 @@
-# API and interactive use
+# Run a sensor and collector
 
-Build with `./scripts/cargo.sh build --release --locked --bins`. Run the following in one terminal:
+First build with `./scripts/cargo.sh build --release --locked --bins`.
 
-```sh
-export GRIDSTREAM_DEVICE_TOKEN="$(openssl rand -hex 24)"
-export GRIDSTREAM_OPERATOR_TOKEN="$(openssl rand -hex 24)"
-target/release/gridstream serve
-```
-
-In a second terminal, set the **same values** for those environment variables. Keep them out of committed files. Then stage and replay synthetic telemetry:
+## Terminal 1: collector
 
 ```sh
-target/release/gridstream stage --devices 8 --batches 4 --batch-size 64
-target/release/gridstream replay
-curl -s -H "Authorization: Bearer $GRIDSTREAM_OPERATOR_TOKEN" \
-  http://127.0.0.1:8080/v1/fleet
+export SENSOR_RELAY_WRITE_TOKEN="$(openssl rand -hex 24)"
+export SENSOR_RELAY_READ_TOKEN="$(openssl rand -hex 24)"
+target/release/sensor-relay serve
 ```
 
-Staging works while the server is stopped. Restart the server and run `replay` to recover pending data. Default paths are `data/fleet.duckdb` and `data/edge.sqlite`. Each live edge needs its own spool:
+The collector listens on `127.0.0.1:8080` and saves readings to `data/readings.duckdb`.
+
+## Terminal 2: readings
+
+Set the **same values** for those two environment variables in this terminal. Keep them out of committed files. Then stage a few batches and send them:
 
 ```sh
-target/release/gridstream device --id battery-live --spool data/live.sqlite --ticks 60
+target/release/sensor-relay stage --devices 2 --batches 3 --batch-size 8
+target/release/sensor-relay replay
+curl -s -H "Authorization: Bearer $SENSOR_RELAY_READ_TOKEN" \
+  http://127.0.0.1:8080/v1/snapshot | python3 -m json.tool
 ```
 
-## Endpoints
+With a fresh database, this saves 48 readings. Try stopping the collector before `stage`: staging still works, and `replay` retains pending data until the collector returns. The default outbox is `data/edge.sqlite`.
 
-All times are Unix milliseconds. Except `/readyz`, requests require `Authorization: Bearer <token>`.
+To generate readings continuously, give each simulated sensor its own outbox:
 
-| Method and path | Role | Result |
+```sh
+target/release/sensor-relay stream --id desk-sensor --spool data/desk.sqlite --ticks 60
+```
+
+`stream` generates ten readings per tick, with a default interval of one second. A simulated sample has a temperature in millidegrees Celsius (`23500` = 23.5 °C) and a battery level in basis points (`6500` = 65%).
+
+## HTTP interface
+
+All timestamps are Unix milliseconds. Requests use `Authorization: Bearer <token>` except `/readyz`.
+
+| Method and path | Token | Response |
 | --- | --- | --- |
-| `POST /v1/telemetry` | Device | Commit or duplicate receipt |
-| `GET /v1/fleet?freshness_ms=30000` | Operator | Durable counts and latest fresh fleet snapshot |
-| `GET /v1/windows?from_ms=…&to_ms=…&bucket_ms=60000` | Operator | Sample-weighted event-time buckets |
-| `POST /v1/commands` | Operator | Create command or return identical existing command |
-| `GET /v1/devices/{device}/command` | Device | Latest unexpired command, or JSON `null` |
-| `POST /v1/devices/{device}/commands/{id}/ack` | Device | Acknowledge current unexpired command |
-| `GET /metrics` | Operator | Prometheus-format counters and queue depth |
+| `POST /v1/telemetry` | Write | Commit or duplicate receipt |
+| `GET /v1/snapshot?freshness_ms=30000` | Read | Counts and averages over the latest fresh sensor readings |
+| `GET /v1/windows?from_ms=…&to_ms=…&bucket_ms=60000` | Read | Average temperature and minimum battery level per time bucket |
+| `GET /metrics` | Read | Prometheus-format counters and queue depth |
 | `GET /readyz` | None | Readiness through the storage mailbox |
 
-Telemetry body:
+Example batch shape:
 
 ```json
 {
-  "device_id": "battery-0000",
+  "device_id": "desk-sensor",
   "stream_id": "example-stream",
   "first_seq": 0,
   "samples": [
-    {"observed_ms": 1000, "power_w": 1200, "soc_bps": 6500}
+    {"observed_ms": 1000, "temperature_mc": 23500, "battery_bps": 6500}
   ]
 }
 ```
 
-Positive watts mean export/discharge; negative means import/charge. Charge uses basis points (`6500` = 65%). The example timestamp is historical and will be stale; use current time for a fresh snapshot. IDs allow 1–64 ASCII letters, digits, `_`, and `-`. Batches contain 1–256 samples; request bodies are limited to 128 KiB. Each stream starts at zero and advances by batch length.
+The example timestamp is historical; use current time for a fresh snapshot. IDs allow 1–64 ASCII letters, digits, `_`, and `-`. Every stream starts at sequence zero and advances by batch length. Batches contain 1–256 samples; bodies are limited to 128 KiB. Temperatures must fall within −40 to 125 °C, battery levels within 0–100%, and timestamps no more than 60 seconds ahead of server time.
 
-Receipts contain `status` (`committed` or `duplicate`), `next_seq`, and `samples`. Validation errors return `400` (or `422` for JSON type/shape errors); invalid credentials return `401`; identity/sequence conflicts return `409`. Retry `503`, `504`, other server failures, and ambiguous transport outcomes with the identical batch. `503` includes `Retry-After: 1`; the lab edge currently uses its own capped exponential backoff with jitter. Permanent failures keep the batch for inspection and stop replay.
-
-## Issue a simulated command
-
-After sending fresh telemetry for `battery-0000`, generate an expiry and issue a command:
-
-```sh
-expires_ms=$(python3 -c 'import time; print(int(time.time()*1000)+60000)')
-curl -s -X POST http://127.0.0.1:8080/v1/commands \
-  -H "Authorization: Bearer $GRIDSTREAM_OPERATOR_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d "{\"command_id\":\"dispatch-1\",\"device_id\":\"battery-0000\",\"target_w\":1200,\"expires_ms\":$expires_ms}"
-target/release/gridstream poll
-```
-
-Targets are limited to ±10,000 W. Use a new command ID for a new request. `poll` records the local simulated application and acknowledges it; repeating it reports zero new applications. A live `device` also polls after successful telemetry replay. See [command limitations](architecture.md#simulated-commands).
+A receipt contains `status` (`committed` or `duplicate`), `next_seq`, and `samples`. Conflicting identities or sequences return `409`; invalid values return `400`; malformed JSON shapes return `422`. Retry server failures, `503`, `504`, and ambiguous transport outcomes with the identical batch. `503` includes `Retry-After: 1`; the example edge uses its own capped exponential backoff and jitter. Permanent failures keep the batch for inspection and stop replay.

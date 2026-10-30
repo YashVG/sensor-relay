@@ -23,16 +23,16 @@ def free_port():
 class Lab:
     def __init__(self, directory, profile="release", queue_capacity=64):
         self.directory = Path(directory)
-        self.binary = ROOT / "target" / profile / "gridstream"
+        self.binary = ROOT / "target" / profile / "sensor-relay"
         if not self.binary.is_file():
             raise RuntimeError(f"Build first: ./scripts/cargo.sh build --{profile} --bins"
                                if profile == "release" else "Build first: ./scripts/cargo.sh build --bins")
         self.port = free_port()
         self.url = f"http://127.0.0.1:{self.port}"
-        self.device_token = secrets.token_hex(24)
-        self.operator_token = secrets.token_hex(24)
-        self.env = dict(os.environ, GRIDSTREAM_DEVICE_TOKEN=self.device_token,
-                        GRIDSTREAM_OPERATOR_TOKEN=self.operator_token)
+        self.write_token = secrets.token_hex(24)
+        self.read_token = secrets.token_hex(24)
+        self.env = dict(os.environ, SENSOR_RELAY_WRITE_TOKEN=self.write_token,
+                        SENSOR_RELAY_READ_TOKEN=self.read_token)
         self.queue_capacity = queue_capacity
         self.process = None
         self.log = open(self.directory / "server.log", "a", encoding="utf-8")
@@ -42,7 +42,7 @@ class Lab:
             raise RuntimeError("Server already started")
         self.process = subprocess.Popen(
             [str(self.binary), "serve", "--bind", f"127.0.0.1:{self.port}",
-             "--db", str(self.directory / "fleet.duckdb"),
+             "--db", str(self.directory / "readings.duckdb"),
              "--queue-capacity", str(self.queue_capacity)],
             env=self.env, stdout=self.log, stderr=self.log)
         deadline = time.monotonic() + 20
@@ -85,10 +85,10 @@ class Lab:
             return result
         return json.loads(result.stdout)
 
-    def request(self, method, path, payload=None, role="operator"):
+    def request(self, method, path, payload=None, role="reader"):
         headers = {}
         if role:
-            token = self.device_token if role == "device" else self.operator_token
+            token = self.write_token if role == "writer" else self.read_token
             headers["Authorization"] = f"Bearer {token}"
         data = None
         if payload is not None:
@@ -103,7 +103,7 @@ class Lab:
             body = response.read().decode()
             return response.status, json.loads(body) if body.startswith(("{", "[", "null")) else body
 
-    def ok(self, method, path, payload=None, role="operator"):
+    def ok(self, method, path, payload=None, role="reader"):
         status, body = self.request(method, path, payload, role)
         assert status == 200, (status, body)
         return body

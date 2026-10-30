@@ -1,51 +1,46 @@
-# GridStream
+# Sensor Relay
 
-[![CI](https://github.com/YashVG/gridstream-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/YashVG/gridstream-rs/actions/workflows/ci.yml)
+[![CI](https://github.com/YashVG/sensor-relay/actions/workflows/ci.yml/badge.svg)](https://github.com/YashVG/sensor-relay/actions/workflows/ci.yml)
 
-A Rust lab for collecting battery telemetry over unreliable connections, querying it with DuckDB, and delivering expiring simulated power commands. Edge processes keep a durable outbox; the server acknowledges a batch only after its samples, sequence checkpoint, and retry receipt commit together.
+A small Rust project for learning how to send sensor readings between processes when connections drop, responses get lost, and programs restart.
+
+The setup is intentionally simple: simulated temperature sensors send batches to a collector, and DuckDB stores the readings for SQL queries. Each sensor keeps a local SQLite queue until the collector confirms a batch. That creates a useful problem to study: a failed request does not always mean the server failed to save the data.
 
 ```mermaid
 flowchart LR
-    E["Rust edge processes<br/>synthetic battery samples"] --> O["SQLite outboxes<br/>persistent stream + sequence"]
-    O -->|HTTP batches / retry| A["Axum + Tokio<br/>bounded admission and mailbox"]
-    A --> D["DuckDB owner thread<br/>transactional ingest + analytics"]
-    D -->|commit receipt| O
-    U[Operator] -->|fleet / windows / commands| A
-    A -->|poll + acknowledge| E
+    S[Simulated sensors] --> Q[Local SQLite queue]
+    Q -->|HTTP batches| C[Rust collector]
+    C --> D[DuckDB readings]
+    C -->|commit receipt| Q
 ```
 
-## What it demonstrates
+## Things to experiment with
 
-- **Durable replay:** stable stream identities, ordered batches, duplicate detection, and rejection of changed retries or sequence gaps.
-- **Backpressure:** bounded admitted requests and storage work, HTTP `503` with `Retry-After`, and edge retries with exponential backoff and jitter.
-- **Energy analytics:** event-time fleet power and battery charge snapshots, stale-device exclusion, and sample-weighted time windows in DuckDB SQL.
-- **Control lifecycle:** separate operator credentials, fresh-telemetry checks, per-device command generations, expiry, and persistent simulated application records.
-- **Verification:** Rust contract/HTTP tests, a real-process failure scenario, and a concurrent Rust load generator that measures commit latency and verifies database counts.
+- Stop the collector, generate readings, and replay them after it comes back.
+- Drop a response after a successful write and see why retrying needs a stable batch identity.
+- Shrink the collector's queue and observe rejection, backoff, and latency.
+- Send old readings and compare a latest-sensor snapshot with a time-window average.
 
-## Run the failure demo
+Rust and Tokio handle the client/server processes. SQLite makes the pending queue survive restarts. DuckDB keeps the query side small enough to inspect directly. [The design notes](docs/architecture.md) explain the choices and their limits.
 
-Requirements: Rust via [rustup](https://rustup.rs/), a C compiler, Python 3.9+, `curl`, `tar`, and `shasum`. macOS and glibc Linux on ARM64/x86_64 are supported by the runtime script. Rust is pinned in `rust-toolchain.toml`; the script downloads and SHA-256-verifies the official DuckDB 2.0.0 library. No Docker or cloud account is needed.
+## Try it
+
+Requirements: [rustup](https://rustup.rs/), a C compiler, Python 3.9+, `curl`, `tar`, and `shasum`. The build script supports macOS and glibc Linux on ARM64/x86_64. It fetches a checksum-verified DuckDB 2.0.0 library; Rust is pinned in `rust-toolchain.toml`.
 
 ```sh
 ./scripts/cargo.sh build --release --locked --bins
 python3 scripts/scenario.py
-python3 scripts/benchmark.py
 ```
 
-The scenario creates temporary databases and random credentials, drops an acknowledgement after commit, kills the server with `SIGKILL`, restarts it, and checks replay, concurrent edges, command expiry, and analytics. It cleans up its processes and databases. Success prints nine passed checks and **125 committed samples**.
+The scenario runs actual client/server processes, disconnects a client after a committed write, kills and restarts the collector, then checks the recovered data. It uses temporary files and prints seven passed checks with 125 saved readings.
+
+For a smaller manual experiment, follow [the two-terminal walkthrough](docs/api.md). For focused exercises, see [experiments](docs/experiments.md).
 
 ```sh
 ./scripts/cargo.sh test --locked
-./scripts/cargo.sh clippy --locked --all-targets -- -D warnings
-./scripts/cargo.sh fmt --check
+python3 scripts/benchmark.py
 ```
 
-## Read next
-
-- [Architecture and guarantees](docs/architecture.md): transaction boundaries, ordering, and failure tradeoffs.
-- [API and interactive use](docs/api.md): run an edge/server pair and query telemetry.
-- [Measured results](docs/results.md): reproducible workload, raw measurements, and limitations.
-
-This project explores streaming IoT, Rust, DuckDB, and reliability testing relevant to [distributed energy software](https://www.tesla.com/careers/search/job/internship-distributed-systems-software-engineer-energy-engineering-winter-spring-2027-285508). It uses synthetic data and simulated setpoints. Storage is a single local DuckDB instance; there is no replication, consensus, hardware control, or production-scale claim. See the architecture notes before exposing the service beyond localhost.
+[Benchmark notes](docs/results.md) include the workload and raw results. The sensors are simulated; the measurements are from one laptop over localhost. The collector is a single process with a single database, and all queries share its storage worker. Real hardware, replication, and long-running deployment are possible follow-up projects.
 
 MIT licensed.

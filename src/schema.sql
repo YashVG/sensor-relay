@@ -9,8 +9,8 @@ CREATE TABLE IF NOT EXISTS telemetry (
     stream_id VARCHAR NOT NULL,
     seq BIGINT NOT NULL,
     observed_ms BIGINT NOT NULL,
-    power_w BIGINT NOT NULL,
-    soc_bps INTEGER NOT NULL,
+    temperature_mc BIGINT NOT NULL,
+    battery_bps INTEGER NOT NULL,
     PRIMARY KEY (device_id, stream_id, seq)
 );
 CREATE TABLE IF NOT EXISTS receipts (
@@ -20,13 +20,4 @@ CREATE TABLE IF NOT EXISTS receipts (
     digest VARCHAR NOT NULL,
     sample_count BIGINT NOT NULL,
     PRIMARY KEY (device_id, stream_id, first_seq)
-);
-CREATE TABLE IF NOT EXISTS commands (
-    command_id VARCHAR PRIMARY KEY,
-    device_id VARCHAR NOT NULL,
-    target_w BIGINT NOT NULL,
-    expires_ms BIGINT NOT NULL,
-    generation BIGINT NOT NULL,
-    acknowledged BOOLEAN NOT NULL DEFAULT FALSE,
-    UNIQUE (device_id, generation)
 );

@@ -4,7 +4,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::{path::Path, time::Duration};
 use uuid::Uuid;
 
-/// SQLite is a local transport outbox, not the fleet analytics database.
+/// SQLite stores the batches waiting to be sent.
 pub struct Outbox {
     conn: Connection,
     max_pending: usize,
@@ -17,8 +17,7 @@ impl Outbox {
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
             CREATE TABLE IF NOT EXISTS devices (device_id TEXT PRIMARY KEY, stream_id TEXT NOT NULL, next_seq INTEGER NOT NULL);
-            CREATE TABLE IF NOT EXISTS outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, payload TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS applied_commands (device_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, payload TEXT NOT NULL);")?;
+            CREATE TABLE IF NOT EXISTS outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, payload TEXT NOT NULL);")?;
         Ok(Self { conn, max_pending })
     }
 
@@ -88,53 +87,6 @@ impl Outbox {
             params![id, serde_json::to_string(batch)?],
         )?;
         Ok(())
-    }
-
-    pub fn devices(&self) -> Result<Vec<String>> {
-        Ok(self
-            .conn
-            .prepare("SELECT device_id FROM devices ORDER BY device_id")?
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?)
-    }
-
-    /// Records a simulated setpoint only. No physical device is controlled.
-    pub fn apply_command(&mut self, command: &Command, now: i64) -> Result<bool> {
-        ensure!(
-            command.expires_ms > now
-                && command.generation > 0
-                && (-10_000..=10_000).contains(&command.target_w),
-            "expired or invalid command"
-        );
-        let tx = self
-            .conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let existing: Option<(i64, String)> = tx
-            .query_row(
-                "SELECT generation,payload FROM applied_commands WHERE device_id=?",
-                params![command.device_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        if let Some((generation, text)) = existing {
-            if generation > command.generation {
-                return Ok(false);
-            }
-            if generation == command.generation {
-                let old: Command = serde_json::from_str(&text)?;
-                ensure!(
-                    old.command_id == command.command_id
-                        && old.target_w == command.target_w
-                        && old.expires_ms == command.expires_ms,
-                    "same generation has conflicting command content"
-                );
-                return Ok(false);
-            }
-        }
-        tx.execute("INSERT INTO applied_commands VALUES (?, ?, ?) ON CONFLICT(device_id) DO UPDATE SET generation=excluded.generation,payload=excluded.payload",
-            params![command.device_id, command.generation, serde_json::to_string(command)?])?;
-        tx.commit()?;
-        Ok(true)
     }
 }
 
@@ -212,45 +164,14 @@ pub async fn replay(
     Ok(report)
 }
 
-pub async fn poll_commands(outbox: &mut Outbox, base: &str, token: &str) -> Result<usize> {
-    let http = client()?;
-    let base = base.trim_end_matches('/');
-    let mut applied = 0;
-    for device in outbox.devices()? {
-        let command: Option<Command> = http
-            .get(format!("{base}/v1/devices/{device}/command"))
-            .bearer_auth(token)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        if let Some(command) = command {
-            ensure!(
-                command.device_id == device,
-                "command addressed to wrong device"
-            );
-            applied += usize::from(outbox.apply_command(&command, now_ms())?);
-            http.post(format!(
-                "{base}/v1/devices/{device}/commands/{}/ack",
-                command.command_id
-            ))
-            .bearer_auth(token)
-            .send()
-            .await?
-            .error_for_status()?;
-        }
-    }
-    Ok(applied)
-}
-
-/// Reproducible synthetic samples; no hardware or Tesla data.
+/// Reproducible readings from simulated temperature sensors.
 pub fn synthetic_samples(count: usize, end_ms: i64, seed: u64) -> Vec<Sample> {
     (0..count)
         .map(|i| Sample {
             observed_ms: end_ms - (count - i - 1) as i64 * 100,
-            power_w: ((seed.wrapping_mul(37).wrapping_add(i as u64 * 137)) % 10_000) as i64 - 5000,
-            soc_bps: 4000 + (seed % 2000) as u16,
+            temperature_mc: 18_000
+                + ((seed.wrapping_mul(37).wrapping_add(i as u64 * 137)) % 12_000) as i64,
+            battery_bps: 6000 + (seed % 4000) as u16,
         })
         .collect()
 }

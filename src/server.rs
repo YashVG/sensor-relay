@@ -4,7 +4,7 @@ use crate::{
 };
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Path, Query, Request, State},
+    extract::{DefaultBodyLimit, Query, Request, State},
     http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -26,11 +26,8 @@ use tokio::sync::{Semaphore, mpsc, oneshot};
 type WorkResult = Result<Value, StoreError>;
 enum Operation {
     Ingest(Batch),
-    Fleet(i64),
+    Snapshot(i64),
     Windows(i64, i64, i64),
-    Issue(CommandRequest),
-    Poll(String),
-    Ack(String, String),
     Health,
 }
 struct Work {
@@ -49,8 +46,8 @@ struct Metrics {
 #[derive(Clone)]
 struct AppState {
     queue: mpsc::Sender<Work>,
-    device_token: Arc<str>,
-    operator_token: Arc<str>,
+    write_token: Arc<str>,
+    read_token: Arc<str>,
     metrics: Arc<Metrics>,
     admission: Arc<Semaphore>,
 }
@@ -62,17 +59,17 @@ pub struct Server {
 
 pub fn server(
     db: impl AsRef<FilePath>,
-    device_token: String,
-    operator_token: String,
+    write_token: String,
+    read_token: String,
     queue_capacity: usize,
 ) -> anyhow::Result<Server> {
     anyhow::ensure!(
-        device_token.len() >= 16 && operator_token.len() >= 16,
+        write_token.len() >= 16 && read_token.len() >= 16,
         "tokens must have at least 16 characters"
     );
     anyhow::ensure!(
-        device_token != operator_token,
-        "device and operator tokens must differ"
+        write_token != read_token,
+        "write and read tokens must differ"
     );
     anyhow::ensure!(
         (1..=4096).contains(&queue_capacity),
@@ -98,16 +95,11 @@ pub fn server(
                         }
                         json!(receipt)
                     }),
-                    Operation::Fleet(freshness) => store.fleet(now, freshness).map(|v| json!(v)),
+                    Operation::Snapshot(freshness) => {
+                        store.snapshot(now, freshness).map(|v| json!(v))
+                    }
                     Operation::Windows(from, to, bucket) => {
                         store.windows(from, to, bucket).map(|v| json!(v))
-                    }
-                    Operation::Issue(req) => store.issue_command(&req, now).map(|v| json!(v)),
-                    Operation::Poll(device) => {
-                        store.current_command(&device, now).map(|v| json!(v))
-                    }
-                    Operation::Ack(device, id) => {
-                        store.ack_command(&device, &id, now).map(|v| json!(v))
                     }
                     Operation::Health => Ok(json!({"ready":true})),
                 };
@@ -121,18 +113,15 @@ pub fn server(
         })?;
     let state = AppState {
         queue,
-        device_token: device_token.into(),
-        operator_token: operator_token.into(),
+        write_token: write_token.into(),
+        read_token: read_token.into(),
         metrics,
         admission: Arc::new(Semaphore::new(queue_capacity + 4)),
     };
     let router = Router::new()
         .route("/v1/telemetry", post(ingest))
-        .route("/v1/fleet", get(fleet))
+        .route("/v1/snapshot", get(snapshot))
         .route("/v1/windows", get(windows))
-        .route("/v1/commands", post(issue))
-        .route("/v1/devices/{device}/command", get(poll))
-        .route("/v1/devices/{device}/commands/{id}/ack", post(ack))
         .route("/metrics", get(metrics_handler))
         .route("/readyz", get(ready))
         .layer(DefaultBodyLimit::max(128 * 1024))
@@ -220,7 +209,7 @@ async fn ingest(
     headers: HeaderMap,
     Json(batch): Json<Batch>,
 ) -> Result<Json<Value>, ApiError> {
-    authorize(&headers, &state.device_token)?;
+    authorize(&headers, &state.write_token)?;
     batch
         .validate(now_ms())
         .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
@@ -228,20 +217,20 @@ async fn ingest(
 }
 
 #[derive(Deserialize)]
-struct FleetQuery {
+struct SnapshotQuery {
     #[serde(default = "default_freshness")]
     freshness_ms: i64,
 }
 fn default_freshness() -> i64 {
     30_000
 }
-async fn fleet(
+async fn snapshot(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<FleetQuery>,
+    Query(query): Query<SnapshotQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    authorize(&headers, &state.operator_token)?;
-    submit(&state, Operation::Fleet(query.freshness_ms)).await
+    authorize(&headers, &state.read_token)?;
+    submit(&state, Operation::Snapshot(query.freshness_ms)).await
 }
 #[derive(Deserialize)]
 struct WindowQuery {
@@ -258,36 +247,12 @@ async fn windows(
     headers: HeaderMap,
     Query(query): Query<WindowQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    authorize(&headers, &state.operator_token)?;
+    authorize(&headers, &state.read_token)?;
     submit(
         &state,
         Operation::Windows(query.from_ms, query.to_ms, query.bucket_ms),
     )
     .await
-}
-async fn issue(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(req): Json<CommandRequest>,
-) -> Result<Json<Value>, ApiError> {
-    authorize(&headers, &state.operator_token)?;
-    submit(&state, Operation::Issue(req)).await
-}
-async fn poll(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(device): Path<String>,
-) -> Result<Json<Value>, ApiError> {
-    authorize(&headers, &state.device_token)?;
-    submit(&state, Operation::Poll(device)).await
-}
-async fn ack(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((device, id)): Path<(String, String)>,
-) -> Result<Json<Value>, ApiError> {
-    authorize(&headers, &state.device_token)?;
-    submit(&state, Operation::Ack(device, id)).await
 }
 async fn ready(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     submit(&state, Operation::Health).await
@@ -296,12 +261,12 @@ async fn metrics_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
-    authorize(&headers, &state.operator_token)?;
+    authorize(&headers, &state.read_token)?;
     let m = &state.metrics;
     Ok((
         [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
         format!(
-            "# TYPE gridstream_committed_samples_total counter\ngridstream_committed_samples_total {}\n# TYPE gridstream_duplicate_batches_total counter\ngridstream_duplicate_batches_total {}\n# TYPE gridstream_overloaded_total counter\ngridstream_overloaded_total {}\n# TYPE gridstream_storage_errors_total counter\ngridstream_storage_errors_total {}\n# TYPE gridstream_queue_depth gauge\ngridstream_queue_depth {}\n",
+            "# TYPE sensor_relay_committed_samples_total counter\nsensor_relay_committed_samples_total {}\n# TYPE sensor_relay_duplicate_batches_total counter\nsensor_relay_duplicate_batches_total {}\n# TYPE sensor_relay_overloaded_total counter\nsensor_relay_overloaded_total {}\n# TYPE sensor_relay_storage_errors_total counter\nsensor_relay_storage_errors_total {}\n# TYPE sensor_relay_queue_depth gauge\nsensor_relay_queue_depth {}\n",
             m.committed.load(Ordering::Relaxed),
             m.duplicates.load(Ordering::Relaxed),
             m.overloaded.load(Ordering::Relaxed),
@@ -326,8 +291,8 @@ mod tests {
             .unwrap_or_else(|_| panic!("empty queue"));
         let state = AppState {
             queue,
-            device_token: "device".into(),
-            operator_token: "operator".into(),
+            write_token: "device".into(),
+            read_token: "reader".into(),
             metrics: Arc::default(),
             admission: Arc::new(Semaphore::new(1)),
         };

@@ -61,68 +61,48 @@ def scenario(directory, profile):
         proxy_url = f"http://127.0.0.1:{proxy.server_address[1]}"
         lab.cli("replay", "--spool", spool, "--url", proxy_url, "--attempts", 1, expect_success=False)
         assert pending(spool) == 6
-        assert lab.ok("GET", "/v1/fleet")["committed_samples"] == 8
+        assert lab.ok("GET", "/v1/snapshot")["committed_samples"] == 8
         checks.append("lost ACK leaves committed batch in the edge outbox")
 
         lab.stop(crash=True)
         lab.start()
-        assert lab.ok("GET", "/v1/fleet")["committed_samples"] == 8
+        assert lab.ok("GET", "/v1/snapshot")["committed_samples"] == 8
         report = lab.cli("replay", "--spool", spool, "--url", lab.url)
         assert report["batches"] == 6 and report["samples"] == 48 and report["duplicates"] == 1
         assert pending(spool) == 0
-        assert lab.ok("GET", "/v1/fleet")["committed_samples"] == 48
+        assert lab.ok("GET", "/v1/snapshot")["committed_samples"] == 48
         checks.append("SIGKILL recovery retains commit and deduplicates its retry")
 
         lab.cli("stage", "--spool", spool, "--devices", 2, "--batches", 1, "--batch-size", 8)
         lab.cli("replay", "--spool", spool, "--url", lab.url)
-        assert lab.ok("GET", "/v1/fleet")["committed_samples"] == 64
+        assert lab.ok("GET", "/v1/snapshot")["committed_samples"] == 64
         checks.append("restarted edge resumes the same streams and sequences")
 
         for device in range(3):
             children.append(subprocess.Popen([
-                str(lab.binary), "device", "--id", f"parallel-{device}",
+                str(lab.binary), "stream", "--id", f"parallel-{device}",
                 "--spool", str(lab.directory / f"edge-{device}.sqlite"),
                 "--url", lab.url, "--ticks", "2", "--interval-ms", "10"],
                 env=lab.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
         for child in children:
             _, error = child.communicate(timeout=40)
             assert child.returncode == 0, error
-        assert lab.ok("GET", "/v1/fleet")["committed_samples"] == 124
+        assert lab.ok("GET", "/v1/snapshot")["committed_samples"] == 124
         checks.append("3 independent edge processes stream concurrently")
 
-        expires = int(time.time() * 1000) + 20_000
-        for name in ["old", "current"]:
-            lab.ok("POST", "/v1/commands", {"command_id": name, "device_id": "battery-0000",
-                                             "target_w": 1200, "expires_ms": expires})
-        assert lab.request("POST", "/v1/devices/battery-0000/commands/old/ack", role="device")[0] == 409
-        assert lab.cli("poll", "--spool", spool, "--url", lab.url)["new_simulated_applications"] == 1
-        assert lab.cli("poll", "--spool", spool, "--url", lab.url)["new_simulated_applications"] == 0
-        command = lab.ok("GET", "/v1/devices/battery-0000/command", role="device")
-        assert command["acknowledged"] and command["generation"] == 2
-        checks.append("superseded ACK rejected; command application survives edge restart")
-
-        lab.ok("POST", "/v1/commands", {"command_id": "short-lived", "device_id": "battery-0000",
-                                         "target_w": 0, "expires_ms": int(time.time() * 1000) + 300})
-        deadline = time.monotonic() + 5
-        while lab.ok("GET", "/v1/devices/battery-0000/command", role="device") is not None:
-            assert time.monotonic() < deadline
-            time.sleep(0.05)
-        assert lab.cli("poll", "--spool", spool, "--url", lab.url)["new_simulated_applications"] == 0
-        checks.append("expired command is not delivered or newly applied")
-
+        before_stale = lab.ok("GET", "/v1/snapshot")
         now = int(time.time() * 1000)
         lab.ok("POST", "/v1/telemetry", {"device_id": "offline", "stream_id": "boot", "first_seq": 0,
-                                         "samples": [{"observed_ms": now - 120_000, "power_w": 9999, "soc_bps": 3000}]}, "device")
-        fleet = lab.ok("GET", "/v1/fleet")
-        assert fleet["committed_samples"] == 125 and fleet["known_devices"] == 6
-        assert fleet["fresh_devices"] == 5 and fleet["stale_devices"] == 1
-        assert lab.request("POST", "/v1/commands", {"command_id": "unsafe-stale", "device_id": "offline",
-                                                    "target_w": 1000, "expires_ms": now + 10_000})[0] == 409
+                                         "samples": [{"observed_ms": now - 120_000, "temperature_mc": -10000, "battery_bps": 3000}]}, "writer")
+        snapshot = lab.ok("GET", "/v1/snapshot")
+        assert snapshot["committed_samples"] == 125 and snapshot["known_devices"] == 6
+        assert snapshot["fresh_devices"] == 5 and snapshot["stale_devices"] == 1
+        assert snapshot["mean_temperature_mc"] == before_stale["mean_temperature_mc"]
         windows = lab.ok("GET", f"/v1/windows?from_ms={now - 180_000}&to_ms={now + 1}&bucket_ms=1000")
         assert sum(window["samples"] for window in windows) == 125
-        assert lab.request("GET", "/v1/fleet", role="device")[0] == 401
-        checks.append("event-time analytics count 125 samples; stale device cannot receive a new command")
-        checks.append("device credential cannot read operator analytics")
+        assert lab.request("GET", "/v1/snapshot", role="writer")[0] == 401
+        checks.append("event-time analytics count 125 samples; stale sensor is excluded from the latest average")
+        checks.append("write credential cannot access read-only queries")
         return {"passed": len(checks), "checks": checks, "final_committed_samples": 125,
                 "duplicate_after_lost_ack": report["duplicates"],
                 "scope": "localhost HTTP, separate OS processes, SIGKILL; no physical power-loss or hardware test"}
@@ -143,5 +123,5 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", choices=["release", "debug"], default="release")
     args = parser.parse_args()
-    with tempfile.TemporaryDirectory(prefix="gridstream-faults-") as directory:
+    with tempfile.TemporaryDirectory(prefix="sensor-relay-faults-") as directory:
         print(json.dumps(scenario(directory, args.profile), indent=2))

@@ -1,9 +1,9 @@
 [package]
-name = "gridstream"
-version = "0.1.0"
+name = "sensor-relay"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.99"
-description = "A Rust energy telemetry lab with durable edge replay and DuckDB analytics"
+description = "A Rust learning project for reliable sensor delivery, replay, and time-series queries"
 license = "MIT"
 
 [dependencies]

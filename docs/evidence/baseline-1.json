@@ -1,9 +1,9 @@
 {
   "architecture": "aarch64",
   "batch_commit_latency_ms": {
-    "p50": 36.735707999999995,
-    "p95": 46.81825,
-    "p99": 55.825209
+    "p50": 29.697416,
+    "p95": 33.872667,
+    "p99": 37.137416
   },
   "batch_size": 64,
   "batches_per_device": 8,
@@ -11,16 +11,18 @@
   "concurrency": 16,
   "devices": 64,
   "duplicate_receipts": 128,
-  "elapsed_seconds": 1.32678425,
+  "elapsed_seconds": 1.044863625,
   "http_attempts": 640,
   "latency_scope": "HTTP serialization, network, queue, DuckDB commit, ACK; includes 503 retry waits; excludes explicit duplicate probes",
   "os": "macos",
   "overloaded_responses": 0,
-  "run_id": "70db015f-9609-472a-a92f-250e90e48c33",
+  "project_version": "0.2.0",
+  "run_id": "1c349dad-4c8e-48e0-a141-258cf31ed23b",
+  "sample_format": "temperature_mc + battery_bps",
   "throughput_scope": "unique committed samples / wall time, including duplicate probes",
   "unique_samples": 32768,
-  "unique_samples_per_second": 24697.30854884658,
-  "measured_at_utc": "2026-10-30T18:25:55.540230+00:00",
+  "unique_samples_per_second": 31361.030488548204,
+  "measured_at_utc": "2026-10-30T18:38:41.435901+00:00",
   "queue_capacity": 64,
   "duckdb_version": "2.0.0",
   "rust_profile": "release",
@@ -28,11 +30,11 @@
   "verified_committed_samples": 32768,
   "verified_committed_batches": 512,
   "server_counters": {
-    "gridstream_committed_samples_total": 32768,
-    "gridstream_duplicate_batches_total": 128,
-    "gridstream_overloaded_total": 0,
-    "gridstream_storage_errors_total": 0,
-    "gridstream_queue_depth": 0
+    "sensor_relay_committed_samples_total": 32768,
+    "sensor_relay_duplicate_batches_total": 128,
+    "sensor_relay_overloaded_total": 0,
+    "sensor_relay_storage_errors_total": 0,
+    "sensor_relay_queue_depth": 0
   },
   "environment": "single host, loopback HTTP, fresh temporary database, synthetic load; server and client share resources"
 }

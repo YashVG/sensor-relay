@@ -1,15 +1,13 @@
 {
-  "passed": 9,
+  "passed": 7,
   "checks": [
     "offline replay preserves all 6 durable batches",
     "lost ACK leaves committed batch in the edge outbox",
     "SIGKILL recovery retains commit and deduplicates its retry",
     "restarted edge resumes the same streams and sequences",
     "3 independent edge processes stream concurrently",
-    "superseded ACK rejected; command application survives edge restart",
-    "expired command is not delivered or newly applied",
-    "event-time analytics count 125 samples; stale device cannot receive a new command",
-    "device credential cannot read operator analytics"
+    "event-time analytics count 125 samples; stale sensor is excluded from the latest average",
+    "write credential cannot access read-only queries"
   ],
   "final_committed_samples": 125,
   "duplicate_after_lost_ack": 1,
