@@ -1,0 +1,9 @@
+/target/
+/.runtime/
+/data/
+/results/
+*.duckdb*
+*.sqlite*
+.env
+.DS_Store
+__pycache__/

@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Rust and process recovery
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install pinned toolchain
+        run: rustup show
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            .runtime
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/cargo.sh') }}
+      - name: Formatting
+        run: ./scripts/cargo.sh fmt --check
+      - name: Lints
+        run: ./scripts/cargo.sh clippy --locked --all-targets -- -D warnings
+      - name: Contracts and HTTP behavior
+        run: ./scripts/cargo.sh test --locked
+      - name: Build process scenario binaries
+        run: ./scripts/cargo.sh build --locked --bins
+      - name: Lost ACK, SIGKILL, and edge recovery
+        run: python3 scripts/scenario.py --profile debug

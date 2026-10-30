@@ -1,0 +1,38 @@
+{
+  "architecture": "aarch64",
+  "batch_commit_latency_ms": {
+    "p50": 32.109375,
+    "p95": 44.586917,
+    "p99": 64.855208
+  },
+  "batch_size": 128,
+  "batches_per_device": 128,
+  "committed_batches": 8192,
+  "concurrency": 16,
+  "devices": 64,
+  "duplicate_receipts": 2048,
+  "elapsed_seconds": 18.622004708,
+  "http_attempts": 10240,
+  "latency_scope": "HTTP serialization, network, queue, DuckDB commit, ACK; includes 503 retry waits; excludes explicit duplicate probes",
+  "os": "macos",
+  "overloaded_responses": 0,
+  "run_id": "f2ffe689-33a2-473b-ad92-bfb0400f80ec",
+  "throughput_scope": "unique committed samples / wall time, including duplicate probes",
+  "unique_samples": 1048576,
+  "unique_samples_per_second": 56308.43813230981,
+  "measured_at_utc": "2026-10-30T18:27:16.457467+00:00",
+  "queue_capacity": 64,
+  "duckdb_version": "2.0.0",
+  "rust_profile": "release",
+  "os_release": "27.2.0",
+  "verified_committed_samples": 1048576,
+  "verified_committed_batches": 8192,
+  "server_counters": {
+    "gridstream_committed_samples_total": 1048576,
+    "gridstream_duplicate_batches_total": 2048,
+    "gridstream_overloaded_total": 0,
+    "gridstream_storage_errors_total": 0,
+    "gridstream_queue_depth": 0
+  },
+  "environment": "single host, loopback HTTP, fresh temporary database, synthetic load; server and client share resources"
+}
