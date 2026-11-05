@@ -32,8 +32,44 @@ The [one-slot queue experiment](evidence/overload.json) returned 1,088 overload 
 
 ## Checks behind the numbers
 
-There are 16 passing Rust tests covering duplicate/gap handling, transaction rollback, persistent checkpoints, stale/future observations, value bounds, and HTTP authentication. Formatting and Clippy also pass.
+There are 17 passing Rust tests covering duplicate/gap handling, transaction rollback, persistent checkpoints, stale/future observations, value bounds, and HTTP authentication. Formatting and Clippy also pass.
 
 The [process experiment](evidence/fault-scenario.json) passes seven checks. It disconnects a client after commit, kills and restarts the collector, replays the durable queue, and runs three edge processes concurrently. The final database contains exactly 125 readings. It tests process termination, not physical storage failure.
 
 [CI](https://github.com/YashVG/sensor-relay/actions/workflows/ci.yml) runs the Rust checks and process experiment on Ubuntu. The performance values here come from the local release build.
+
+## Snapshot query optimization — November 5, 2026
+
+The snapshot query now groups by device and uses `arg_max` on
+`(observed_ms, stream_id, seq)` instead of sorting each device's full history
+with `row_number`. This retains the existing event-time cutoff and deterministic
+tie breaks. Both selected value columns are non-null in the schema. No schema
+migration or changes to ingestion, receipts, or transactions are needed.
+
+A local release-mode comparison used an in-memory DuckDB database with one
+million synthetic rows, the existing 256 MB memory limit and two database
+threads, two warmup executions per query, and ten measured executions per query.
+Execution order alternated. Setup/insertion, HTTP, queue wait, and the unchanged
+sample/receipt count queries are excluded. These measurements describe the
+latest-per-device query only, not endpoint latency or ingestion throughput.
+
+| Devices | Original median | Grouped median | Speedup |
+| ---: | ---: | ---: | ---: |
+| 64 | 142.738 ms | 24.355 ms | 5.86x |
+| 10,000 | 136.431 ms | 32.387 ms | 4.21x |
+
+The fixture contains repeated timestamps, multiple streams, out-of-order event
+times, and different payload values. A regression test compares the full query
+result with the original implementation across empty and populated histories,
+as-of times, freshness boundaries, and both stream and sequence ties. The
+benchmark also checks that both implementations agree before timing them.
+
+Reproduce with:
+
+```sh
+./scripts/cargo.sh test --release --locked benchmark_snapshot_queries -- --ignored --nocapture
+```
+
+Raw timing output: [snapshot query comparison](evidence/snapshot-query.txt).
+Results vary with hardware, data distribution, sensor count, and load. The query
+still scans eligible history; this is not a constant-time snapshot cache.

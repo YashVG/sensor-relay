@@ -15,6 +15,17 @@ pub enum StoreError {
 
 pub type Result<T> = std::result::Result<T, StoreError>;
 
+// Keep only the winning observation per device instead of sorting its history.
+// All value/order columns are NOT NULL; the primary key makes the order unique.
+const SNAPSHOT_SQL: &str = "WITH latest AS (
+    SELECT max(observed_ms) AS observed_ms,
+        arg_max(temperature_mc, (observed_ms, stream_id, seq)) AS temperature_mc,
+        arg_max(battery_bps, (observed_ms, stream_id, seq)) AS battery_bps
+    FROM telemetry WHERE observed_ms <= ? GROUP BY device_id
+) SELECT count(*), count(*) FILTER (WHERE observed_ms >= ?),
+    avg(temperature_mc) FILTER (WHERE observed_ms >= ?),
+    avg(battery_bps) FILTER (WHERE observed_ms >= ?) FROM latest";
+
 /// One connection, owned exclusively by the storage actor.
 pub struct Store {
     conn: Connection,
@@ -116,16 +127,26 @@ impl Store {
         // A late arrival cannot replace a newer event-time observation. Future
         // samples are stored, but do not enter the as-of snapshot prematurely.
         let mut stats = self.conn.query_row(
-            "WITH latest AS (
-                SELECT *, row_number() OVER (PARTITION BY device_id ORDER BY observed_ms DESC, stream_id DESC, seq DESC) AS rank
-                FROM telemetry WHERE observed_ms <= ?
-             ) SELECT count(*), count(*) FILTER (WHERE observed_ms >= ?),
-                avg(temperature_mc) FILTER (WHERE observed_ms >= ?),
-                avg(battery_bps) FILTER (WHERE observed_ms >= ?) FROM latest WHERE rank=1",
-            params![now, now-freshness_ms, now-freshness_ms, now-freshness_ms],
-            |row| Ok(Snapshot { committed_samples: 0, committed_batches: 0, known_devices: row.get(0)?,
-                fresh_devices: row.get(1)?, stale_devices: 0, mean_temperature_mc: row.get(2)?,
-                average_battery_bps: row.get(3)?, as_of_ms: now, freshness_ms }),
+            SNAPSHOT_SQL,
+            params![
+                now,
+                now - freshness_ms,
+                now - freshness_ms,
+                now - freshness_ms
+            ],
+            |row| {
+                Ok(Snapshot {
+                    committed_samples: 0,
+                    committed_batches: 0,
+                    known_devices: row.get(0)?,
+                    fresh_devices: row.get(1)?,
+                    stale_devices: 0,
+                    mean_temperature_mc: row.get(2)?,
+                    average_battery_bps: row.get(3)?,
+                    as_of_ms: now,
+                    freshness_ms,
+                })
+            },
         )?;
         stats.committed_samples =
             self.conn
@@ -168,6 +189,109 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SORTED_SNAPSHOT_SQL: &str = "WITH latest AS (
+                SELECT *, row_number() OVER (PARTITION BY device_id ORDER BY observed_ms DESC, stream_id DESC, seq DESC) AS rank
+                FROM telemetry WHERE observed_ms <= ?
+             ) SELECT count(*), count(*) FILTER (WHERE observed_ms >= ?),
+                avg(temperature_mc) FILTER (WHERE observed_ms >= ?),
+                avg(battery_bps) FILTER (WHERE observed_ms >= ?) FROM latest WHERE rank=1";
+    type Stats = (i64, i64, Option<f64>, Option<f64>);
+
+    fn query_stats(store: &Store, sql: &str, now: i64, freshness: i64) -> Stats {
+        store
+            .conn
+            .query_row(
+                sql,
+                params![now, now - freshness, now - freshness, now - freshness],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap()
+    }
+
+    fn snapshot_fixture(rows: i64, devices: i64) -> Store {
+        let store = Store::memory().unwrap();
+        // Repeated timestamps, multiple streams, out-of-order event times,
+        // and distinct payloads exercise every level of the tie breaker.
+        store
+            .conn
+            .execute(
+                "INSERT INTO telemetry SELECT 'device-' || (i % ?),
+                'stream-' || (i % 3), i, (i * 17) % 10000,
+                (i % 100000) - 40000, CAST(i % 10001 AS INTEGER)
+             FROM range(?) t(i)",
+                params![devices, rows],
+            )
+            .unwrap();
+        store
+    }
+
+    #[test]
+    fn grouped_snapshot_matches_sorted_reference() {
+        for rows in [0, 1, 60000] {
+            let store = snapshot_fixture(rows, 20);
+            for now in [-1, 0, 1, 5000, 9999, 10000, 20000] {
+                for freshness in [1, 100, 10000] {
+                    let expected = query_stats(&store, SORTED_SNAPSHOT_SQL, now, freshness);
+                    let actual = store.snapshot(now, freshness).unwrap();
+                    assert_eq!(
+                        (
+                            actual.known_devices,
+                            actual.fresh_devices,
+                            actual.mean_temperature_mc,
+                            actual.average_battery_bps
+                        ),
+                        expected
+                    );
+                    assert_eq!(actual.stale_devices, expected.0 - expected.1);
+                    assert_eq!(actual.committed_samples, rows);
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual release-mode snapshot query benchmark"]
+    fn benchmark_snapshot_queries() {
+        use std::time::Instant;
+        for devices in [64, 10000] {
+            let store = snapshot_fixture(1_000_000, devices);
+            assert_eq!(
+                query_stats(&store, SNAPSHOT_SQL, 9999, 1000),
+                query_stats(&store, SORTED_SNAPSHOT_SQL, 9999, 1000)
+            );
+            let mut sorted = Vec::new();
+            let mut grouped = Vec::new();
+            // Alternate order to reduce warm-cache/order bias; skip warmups.
+            for round in 0..12 {
+                for old_first in [round % 2 == 0, round % 2 != 0] {
+                    let sql = if old_first {
+                        SORTED_SNAPSHOT_SQL
+                    } else {
+                        SNAPSHOT_SQL
+                    };
+                    let start = Instant::now();
+                    std::hint::black_box(query_stats(&store, sql, 9999, 1000));
+                    let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+                    if round >= 2 {
+                        if old_first {
+                            sorted.push(elapsed);
+                        } else {
+                            grouped.push(elapsed);
+                        }
+                    }
+                }
+            }
+            sorted.sort_by(f64::total_cmp);
+            grouped.sort_by(f64::total_cmp);
+            let old = (sorted[4] + sorted[5]) / 2.0;
+            let new = (grouped[4] + grouped[5]) / 2.0;
+            println!(
+                "rows=1000000 devices={devices} runs=10 sorted_median_ms={old:.3} grouped_median_ms={new:.3} speedup={:.2}x",
+                old / new
+            );
+        }
+    }
 
     #[test]
     fn failure_after_appending_samples_rolls_back_data_and_checkpoint() {
