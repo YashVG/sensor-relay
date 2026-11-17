@@ -32,7 +32,7 @@ The [one-slot queue experiment](evidence/overload.json) returned 1,088 overload 
 
 ## Checks behind the numbers
 
-There are 17 passing Rust tests covering duplicate/gap handling, transaction rollback, persistent checkpoints, stale/future observations, value bounds, and HTTP authentication. Formatting and Clippy also pass.
+There are 25 Rust tests covering duplicate/gap handling, transaction rollback, persistent checkpoints, stale/future observations, value bounds, HTTP authentication, and the [replay retry policy](retry-policy.md). The release-mode snapshot benchmark is an additional ignored test. Run `./scripts/cargo.sh test --locked` for the current suite; CI also checks formatting and Clippy.
 
 The [process experiment](evidence/fault-scenario.json) passes seven checks. It disconnects a client after commit, kills and restarts the collector, replays the durable queue, and runs three edge processes concurrently. The final database contains exactly 125 readings. It tests process termination, not physical storage failure.
 

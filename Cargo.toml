@@ -12,6 +12,7 @@ axum = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
 duckdb = "=1.20000.1"
 hex = "0.4"
+httpdate = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

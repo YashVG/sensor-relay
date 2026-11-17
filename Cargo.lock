@@ -1648,6 +1648,7 @@ dependencies = [
  "clap",
  "duckdb",
  "hex",
+ "httpdate",
  "reqwest",
  "rusqlite",
  "serde",

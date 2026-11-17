@@ -23,6 +23,11 @@ flowchart LR
 
 Rust and Tokio handle the client/server processes. SQLite makes the pending queue survive restarts. DuckDB keeps the query side small enough to inspect directly. [The design notes](docs/architecture.md) explain the choices and their limits.
 
+## Recent improvements
+
+- **Replay under overload:** the edge now respects the collector's `Retry-After` response. [The retry policy](docs/retry-policy.md) explains delay limits, retained batches, and the regression tests.
+- **Latest-sensor queries:** grouped aggregation replaced per-device sorting while preserving event-time and tie-break behavior. [The comparison](docs/results.md#snapshot-query-optimization--november-5-2026) includes the reference-query test and measured results.
+
 ## Try it
 
 Requirements: [rustup](https://rustup.rs/), a C compiler, Python 3.9+, `curl`, `tar`, and `shasum`. The build script supports macOS and glibc Linux on ARM64/x86_64. It fetches a checksum-verified DuckDB 2.0.0 library; Rust is pinned in `rust-toolchain.toml`.

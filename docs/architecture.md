@@ -31,6 +31,8 @@ A snapshot takes the latest observation per sensor at or before server time, the
 
 Batches contain at most 256 readings. The mailbox defaults to 64 operations, with four extra admitted requests. Saturation returns `503`; accepted work can still commit after an HTTP timeout. The edge stops adding readings when its outbox limit is reached and preserves the pending data. These bounds do not cap database growth or all network memory.
 
+Replay respects `Retry-After` on retryable HTTP responses while keeping its local backoff and jitter. Excessive delays stop replay without discarding the batch. The [retry policy](retry-policy.md) defines the limits and regression checks.
+
 ## Current boundaries
 
 The service defaults to localhost. Shared write/read tokens are enough for these experiments; public deployment would need TLS and per-device authorization. Receipts and readings are retained indefinitely. Metrics reset on restart; database counts persist. There are no schema migrations, so use a fresh database when switching between incompatible sample formats. The failure script tests process termination and lost responses, not physical power loss or disk failure.
